@@ -1,0 +1,23 @@
+Matúš: 
+1.Vytlačiť poster a doniesť 4. na obhajobu, najlepšie zalaminovať 
+Deadline: 3.5.
+2.Kompletný popis projektu vložiť na uniot, všetky dokumenty čo treba urobiť, peťo má schému obrázky..., Jakub ma zdrojove kody.., vypytať a nahrať
+Všetko nahráme na github odkiaľ si zoberieš čo treba a dáš na uniot
+Deadline: 2.5.
+
+Jakub:
+1.Dorobiť kód
+Deadline: 30.4.
+2.Vložiť zdrojové kódy a ine materialy vložiť na github
+Deadline: 30.4.
+3.Urobiť krátku prezentáciu v power pointe
+Deadline: 2.5.
+
+
+Peťo:
+1.Vytlačiť dorobiť vrchnák krabičky 3D, výrez
+Deadline: 1.5
+2.Upevniť krabičku a komponenty v nej
+Deadline: 1.5.
+3.Vytvoriť schému zapojenia nahrať na github
+Deadline: 30.4.
