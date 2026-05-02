@@ -1,0 +1,928 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <Adafruit_BME280.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+
+// ============================================================
+// WiFi - ESP32 vytvorí vlastnú sieť
+// ============================================================
+const char* ssid_AP = "EduAir_Senzor";
+const char* password_AP = "12345678";
+
+WebServer server(80);
+
+// Piny pre displej
+#define TFT_CS   5
+#define TFT_DC   2
+#define TFT_RST  4
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_BME280 bme;
+
+// Premenné pre hodnoty
+float teplota = 0;
+float vlhkost = 0;
+float tlak = 0;
+int co2 = 0;  // Len pre web stránku
+
+// História pre graf CO2
+int historiaCO2[20] = {450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640};
+
+// ============================================================
+// Odhad CO2 (len pre web)
+// ============================================================
+void aktualizujCO2() {
+  static unsigned long lastTime = 0;
+  static int lastCO2 = 450;
+  
+  if (millis() - lastTime > 5000) {
+    lastTime = millis();
+    float zmena = (teplota - 22.0) * 15 + (vlhkost - 50.0) * 2;
+    lastCO2 += (int)zmena + random(-20, 20);
+    lastCO2 = constrain(lastCO2, 400, 1800);
+    co2 = lastCO2;
+    
+    // Posun histórie
+    for (int i = 0; i < 19; i++) {
+      historiaCO2[i] = historiaCO2[i+1];
+    }
+    historiaCO2[19] = co2;
+  }
+}
+
+// ============================================================
+// JSON endpoint - pre web stránku
+// ============================================================
+void handleData() {
+  StaticJsonDocument<2048> doc;
+  
+  doc["co2"] = co2;
+  doc["teplota"] = teplota;
+  doc["vlhkost"] = vlhkost;
+  
+  // História pre graf
+  JsonArray arr = doc.createNestedArray("historia");
+  for (int i = 0; i < 20; i++) {
+    arr.add(historiaCO2[i]);
+  }
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+// ============================================================
+// DIZAJNOVÁ HTML STRÁNKA (tvoja predloha)
+// ============================================================
+void handleRoot() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EduAir — IoT monitor kvality vzduchu</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:          #f2f2f7;
+  --surface:     #ffffff;
+  --border:      rgba(0,0,0,0.07);
+  --text:        #1c1c1e;
+  --text-2:      #6e6e73;
+  --text-3:      #aeaeb2;
+  --green:       #34c759;
+  --green-bg:    #e8f8ed;
+  --orange:      #ff9500;
+  --orange-bg:   #fff4e0;
+  --red:         #ff3b30;
+  --red-bg:      #ffe8e7;
+  --blue:        #007aff;
+  --blue-bg:     #e8f0ff;
+  --indigo:      #5856d6;
+  --indigo-bg:   #eef2ff;
+  --radius-sm:   12px;
+  --radius:      20px;
+  --shadow:      0 2px 16px rgba(0,0,0,0.06);
+  --shadow-lg:   0 8px 40px rgba(0,0,0,0.10);
+  --transition:  0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 28px 20px 60px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.header {
+  max-width: 980px;
+  margin: 0 auto 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.brand { display: flex; align-items: center; gap: 12px; }
+
+.brand-icon {
+  width: 42px; height: 42px;
+  border-radius: 13px;
+  background: var(--text);
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+.brand-icon svg { width: 22px; height: 22px; }
+
+.brand-name {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.4px;
+  line-height: 1.1;
+}
+.brand-sub {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-top: 1px;
+}
+
+.header-right { display: flex; align-items: center; gap: 10px; }
+
+.live-pill {
+  display: flex; align-items: center; gap: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 7px 14px;
+  font-size: 13px; font-weight: 500; color: var(--text-2);
+  white-space: nowrap;
+}
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  animation: blink 2s ease-in-out infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.75); }
+}
+
+.grid {
+  max-width: 980px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 22px 24px;
+  transition: transform var(--transition), box-shadow var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.card-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-2);
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 14px;
+}
+.card-label svg { opacity: 0.45; flex-shrink: 0; }
+
+.card-value {
+  font-family: 'DM Mono', monospace;
+  font-size: 48px;
+  font-weight: 300;
+  letter-spacing: -2px;
+  line-height: 1;
+  color: var(--text);
+  transition: color var(--transition);
+}
+.card-unit {
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-2);
+}
+
+.status-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 12px;
+  padding: 5px 11px;
+  border-radius: 100px;
+  font-size: 12px; font-weight: 500;
+  transition: background var(--transition), color var(--transition);
+}
+.status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; flex-shrink: 0;
+}
+
+.card-co2 {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 24px;
+  align-items: start;
+  background: linear-gradient(135deg, #fff 55%, #f2fbf5 100%);
+}
+
+.co2-left { display: flex; flex-direction: column; }
+
+.card-co2 .card-value { font-size: 80px; letter-spacing: -4px; }
+
+.co2-recommendation {
+  margin-top: 10px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  display: flex; align-items: center; gap: 7px;
+}
+.co2-recommendation .rec-icon { font-size: 18px; }
+
+.co2-right {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 10px; padding-top: 4px;
+}
+.co2-decoration {
+  position: absolute; right: -30px; bottom: -30px;
+  width: 180px; height: 180px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(52,199,89,0.10) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.card-info {
+  grid-column: 1 / -1;
+  padding: 18px 24px;
+  background: var(--surface);
+}
+.info-title {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--text-2);
+  margin-bottom: 12px;
+}
+.info-scale {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.scale-item {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 12px; border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.scale-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  margin-top: 3px; flex-shrink: 0;
+}
+.scale-dot.green  { background: var(--green); }
+.scale-dot.orange { background: var(--orange); }
+.scale-dot.red    { background: var(--red); }
+.scale-text strong { display: block; font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.scale-text span   { font-size: 11px; color: var(--text-2); line-height: 1.4; }
+
+.card-chart { grid-column: 1 / -1; padding: 22px 24px 18px; }
+
+.chart-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 16px; flex-wrap: wrap; gap: 10px;
+}
+.chart-title { font-size: 14px; font-weight: 500; }
+.chart-meta  { font-size: 12px; color: var(--text-3); font-family: 'DM Mono', monospace; }
+
+.range-switcher {
+  display: flex; gap: 4px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.range-btn {
+  padding: 6px 14px;
+  border-radius: 9px;
+  border: none; cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px; font-weight: 500;
+  color: var(--text-2);
+  background: transparent;
+  transition: background var(--transition), color var(--transition), box-shadow var(--transition);
+  white-space: nowrap;
+}
+.range-btn:hover { color: var(--text); }
+.range-btn.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.10);
+}
+
+.chart-wrap { position: relative; width: 100%; height: 180px; }
+canvas#grafCO2 { width: 100% !important; height: 100% !important; }
+
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(242,242,247,0.85);
+  backdrop-filter: blur(12px);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 14px; z-index: 100;
+  transition: opacity 0.4s;
+}
+.overlay.skryte { opacity: 0; pointer-events: none; }
+
+.spinner {
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--text);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.overlay-text { font-size: 15px; font-weight: 500; color: var(--text-2); }
+
+.error-icon { font-size: 36px; }
+.error-msg  { font-size: 15px; font-weight: 500; color: var(--red); text-align: center; max-width: 280px; }
+.retry-btn  {
+  margin-top: 4px; padding: 10px 22px;
+  border-radius: 100px; border: none; cursor: pointer;
+  background: var(--text); color: #fff;
+  font-family: 'DM Sans', sans-serif; font-size: 14px; font-weight: 500;
+}
+.retry-btn:hover { opacity: 0.8; }
+
+.footer {
+  max-width: 980px; margin: 14px auto 0;
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 6px;
+  font-size: 12px; color: var(--text-3);
+}
+.footer-updated { font-family: 'DM Mono', monospace; }
+
+@media (max-width: 680px) {
+  .grid { grid-template-columns: 1fr; }
+  .card-co2, .card-info, .card-chart { grid-column: 1; }
+  .card-co2 { grid-template-columns: 1fr; }
+  .co2-right { align-items: flex-start; flex-direction: row; flex-wrap: wrap; }
+  .card-co2 .card-value { font-size: 60px; }
+  .info-scale { grid-template-columns: 1fr; }
+  body { padding: 18px 14px 48px; }
+}
+</style>
+</head>
+<body>
+
+<div class="overlay" id="overlayNacitavanie">
+  <div class="spinner"></div>
+  <div class="overlay-text">Načítavam dáta z ESP32...</div>
+</div>
+
+<div class="overlay skryte" id="overlayChyba">
+  <div class="error-icon">⚠️</div>
+  <div class="error-msg">Nepodarilo sa načítať dáta zo senzora.</div>
+  <button class="retry-btn" onclick="spustiObnovu()">Skúsiť znova</button>
+</div>
+
+<header class="header">
+  <div class="brand">
+    <div class="brand-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2C8 2 4 5.5 4 9.5c0 5.5 8 12.5 8 12.5s8-7 8-12.5C20 5.5 16 2 12 2z"/>
+        <circle cx="12" cy="9.5" r="2.5"/>
+      </svg>
+    </div>
+    <div>
+      <div class="brand-name">EduAir</div>
+      <div class="brand-sub">Kvalita vzduchu v triede · ESP32 + BME280</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="live-pill">
+      <span class="live-dot"></span>
+      Živé meranie
+    </div>
+  </div>
+</header>
+
+<main class="grid">
+
+  <div class="card card-co2">
+    <div class="co2-decoration"></div>
+    <div class="co2-left">
+      <div class="card-label">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+        Oxid uhličitý (CO₂)
+      </div>
+      <div class="card-value" id="hodnotaCO2">—<span class="card-unit"> ppm</span></div>
+      <div class="status-badge" id="stavCO2Badge">
+        <span class="status-dot"></span>
+        <span id="stavCO2Text">Načítavam…</span>
+      </div>
+      <div class="co2-recommendation" id="odporucanieCO2">
+        <span class="rec-icon" id="recIkona">—</span>
+        <span id="recText">—</span>
+      </div>
+    </div>
+    <div class="co2-right">
+      <div class="card-label" style="margin-bottom:0">Index kvality</div>
+      <div class="card-value" style="font-size:40px" id="hodnotaAQI">—<span class="card-unit" style="font-size:16px"> / 5</span></div>
+      <div class="status-badge" id="stavAQIBadge">
+        <span class="status-dot"></span>
+        <span id="stavAQIText">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+      Teplota
+    </div>
+    <div class="card-value" id="hodnotaTeplota">—<span class="card-unit"> °C</span></div>
+    <div class="status-badge" id="stavTeplota">
+      <span class="status-dot"></span>
+      <span id="stavTeplotaText">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+      Vlhkosť vzduchu
+    </div>
+    <div class="card-value" id="hodnotaVlhkost">—<span class="card-unit"> %</span></div>
+    <div class="status-badge" id="stavVlhkost">
+      <span class="status-dot"></span>
+      <span id="stavVlhkostText">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Čas od vetrania
+    </div>
+    <div class="card-value" id="hodnotaCasVetrania">—<span class="card-unit" style="font-size:16px"> min</span></div>
+    <div class="status-badge" style="background:var(--bg); color:var(--text-2);">
+      <span class="status-dot"></span>
+      <span>Odhadovaný čas</span>
+    </div>
+  </div>
+
+  <div class="card card-info">
+    <div class="info-title">Čo znamenajú hodnoty CO₂?</div>
+    <div class="info-scale">
+      <div class="scale-item">
+        <div class="scale-dot green"></div>
+        <div class="scale-text">
+          <strong>Pod 800 ppm — Dobrá</strong>
+          <span>Vzduch je čerstvý, koncentrácia CO₂ je nízka. Netreba vetrať.</span>
+        </div>
+      </div>
+      <div class="scale-item">
+        <div class="scale-dot orange"></div>
+        <div class="scale-text">
+          <strong>800 – 1200 ppm — Stredná</strong>
+          <span>Vzduch začína byť zatuchnutý. Zvážte otvorenie okna.</span>
+        </div>
+      </div>
+      <div class="scale-item">
+        <div class="scale-dot red"></div>
+        <div class="scale-text">
+          <strong>Nad 1200 ppm — Zlá</strong>
+          <span>Vysoká koncentrácia CO₂. Okamžite vyvetrajte miestnosť!</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card card-chart">
+    <div class="chart-header">
+      <div>
+        <div class="chart-title">Graf CO₂</div>
+      </div>
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div class="range-switcher" role="group">
+          <button class="range-btn active" data-rozsah="1h">1 hodina</button>
+          <button class="range-btn" data-rozsah="24h">24 hodín</button>
+          <button class="range-btn" data-rozsah="7d">7 dní</button>
+        </div>
+        <div class="chart-meta" id="chartMeta">—</div>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="grafCO2"></canvas>
+    </div>
+  </div>
+
+</main>
+
+<footer class="footer">
+  <span>EduAir · Školský IoT projekt · ESP32 + BME280</span>
+  <span>Projekt: Praktické aplikácie Internetu vecí</span>
+  <span>Posledná aktualizácia: <span class="footer-updated" id="casAktualizacie">—</span></span>
+</footer>
+
+<script>
+const KONFIG = {
+  intervalObnovy: 5000,
+  co2: { dobre: 800, stredne: 1200 },
+  teplota: { chladno: 16, teplo: 26 },
+  vlhkost: { sucho: 30, vlhko: 60 },
+};
+
+async function nacitajData() {
+  const response = await fetch('/data');
+  if (!response.ok) throw new Error('Chyba spojenia');
+  return await response.json();
+}
+
+function klasifikujCO2(ppm) {
+  if (ppm < KONFIG.co2.dobre) return {
+    label: 'Dobrá kvalita', color: 'var(--green)', bg: 'var(--green-bg)',
+    ikona: '✅', rec: 'Netreba vetrať',
+  };
+  if (ppm < KONFIG.co2.stredne) return {
+    label: 'Stredná kvalita', color: 'var(--orange)', bg: 'var(--orange-bg)',
+    ikona: '🟡', rec: 'Zvážte vetranie',
+  };
+  return {
+    label: 'Zlá kvalita', color: 'var(--red)', bg: 'var(--red-bg)',
+    ikona: '🚨', rec: 'Okamžite vyvetrať!',
+  };
+}
+
+function klasifikujTeplotu(t) {
+  if (t < KONFIG.teplota.chladno) return { label: 'Chladno', color: 'var(--blue)', bg: 'var(--blue-bg)' };
+  if (t < KONFIG.teplota.teplo) return { label: 'Príjemná', color: 'var(--indigo)', bg: 'var(--indigo-bg)' };
+  return { label: 'Teplo', color: 'var(--red)', bg: 'var(--red-bg)' };
+}
+
+function klasifikujVlhkost(h) {
+  if (h < KONFIG.vlhkost.sucho) return { label: 'Suchý vzduch', color: 'var(--orange)', bg: 'var(--orange-bg)' };
+  if (h < KONFIG.vlhkost.vlhko) return { label: 'Optimálna', color: 'var(--blue)', bg: 'var(--blue-bg)' };
+  return { label: 'Vlhký vzduch', color: 'var(--indigo)', bg: 'var(--indigo-bg)' };
+}
+
+function vypocitajAQI(ppm) {
+  if (ppm < 600) return { skore: 5, label: 'Výborná' };
+  if (ppm < 800) return { skore: 4, label: 'Dobrá' };
+  if (ppm < 1000) return { skore: 3, label: 'Priemerná' };
+  if (ppm < 1200) return { skore: 2, label: 'Slabá' };
+  return { skore: 1, label: 'Nebezpečná' };
+}
+
+function odhadniCasVetrania(ppm) {
+  const zakladna = 420;
+  const minuty = Math.max(0, Math.round((ppm - zakladna) / 20));
+  return Math.min(minuty, 99);
+}
+
+function nastavBadge(el, color, bg) {
+  el.style.color = color;
+  el.style.background = bg;
+}
+
+let historiaData = [];
+
+function kresliGraf(data) {
+  const canvas = document.getElementById('grafCO2');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth;
+  const H = canvas.offsetHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  if (!data || data.length < 2) return;
+
+  const pad = { top: 12, right: 14, bottom: 34, left: 50 };
+  const cw = W - pad.left - pad.right;
+  const ch = H - pad.top - pad.bottom;
+
+  const minVal = Math.min(...data) - 100;
+  const maxVal = Math.max(...data) + 100;
+
+  const xOf = i => pad.left + (i / (data.length - 1)) * cw;
+  const yOf = v => pad.top + (1 - (v - minVal) / (maxVal - minVal)) * ch;
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+  ctx.font = '10px DM Mono, monospace';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#aeaeb2';
+  for (let i = 0; i <= 4; i++) {
+    const v = minVal + (i / 4) * (maxVal - minVal);
+    const y = yOf(v);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + cw, y);
+    ctx.stroke();
+    ctx.fillText(Math.round(v), pad.left - 6, y + 4);
+  }
+
+  const yDobre = yOf(800);
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(52,199,89,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(pad.left, yDobre);
+  ctx.lineTo(pad.left + cw, yDobre);
+  ctx.stroke();
+  ctx.restore();
+
+  const yStredne = yOf(1200);
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,149,0,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(pad.left, yStredne);
+  ctx.lineTo(pad.left + cw, yStredne);
+  ctx.stroke();
+  ctx.restore();
+
+  const gradient = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+  gradient.addColorStop(0, 'rgba(52,199,89,0.20)');
+  gradient.addColorStop(0.7, 'rgba(52,199,89,0.04)');
+  gradient.addColorStop(1, 'rgba(52,199,89,0)');
+
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(data[0]));
+  for (let i = 1; i < data.length; i++) ctx.lineTo(xOf(i), yOf(data[i]));
+  ctx.lineTo(xOf(data.length - 1), pad.top + ch);
+  ctx.lineTo(xOf(0), pad.top + ch);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(data[0]));
+  for (let i = 1; i < data.length; i++) ctx.lineTo(xOf(i), yOf(data[i]));
+  ctx.strokeStyle = '#34c759';
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  [[0, data[0]], [data.length - 1, data[data.length - 1]]].forEach(([i, v]) => {
+    ctx.beginPath();
+    ctx.arc(xOf(i), yOf(v), 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#34c759';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = '#aeaeb2';
+  ctx.font = '10px DM Mono, monospace';
+  ctx.textAlign = 'center';
+  [0, Math.floor(data.length / 2), data.length - 1].forEach(i => {
+    const text = i === data.length - 1 ? 'teraz' : `${data.length - i} min späť`;
+    ctx.fillText(text, xOf(i), H - 8);
+  });
+
+  document.getElementById('chartMeta').textContent = `${Math.min(...data)} – ${Math.max(...data)} ppm`;
+}
+
+function aktualizujUI(data) {
+  const { co2, teplota, vlhkost, historia } = data;
+  
+  const stavCO2 = klasifikujCO2(co2);
+  const stavTemp = klasifikujTeplotu(teplota);
+  const stavHum = klasifikujVlhkost(vlhkost);
+  const aqi = vypocitajAQI(co2);
+  const casVetr = odhadniCasVetrania(co2);
+  
+  document.getElementById('hodnotaCO2').childNodes[0].textContent = co2;
+  nastavBadge(document.getElementById('stavCO2Badge'), stavCO2.color, stavCO2.bg);
+  document.getElementById('stavCO2Text').textContent = stavCO2.label;
+  document.getElementById('recIkona').textContent = stavCO2.ikona;
+  document.getElementById('recText').textContent = stavCO2.rec;
+  
+  document.getElementById('hodnotaAQI').childNodes[0].textContent = aqi.skore;
+  nastavBadge(document.getElementById('stavAQIBadge'), stavCO2.color, stavCO2.bg);
+  document.getElementById('stavAQIText').textContent = aqi.label;
+  
+  document.getElementById('hodnotaTeplota').childNodes[0].textContent = teplota.toFixed(1);
+  nastavBadge(document.getElementById('stavTeplota'), stavTemp.color, stavTemp.bg);
+  document.getElementById('stavTeplotaText').textContent = stavTemp.label;
+  
+  document.getElementById('hodnotaVlhkost').childNodes[0].textContent = vlhkost.toFixed(0);
+  nastavBadge(document.getElementById('stavVlhkost'), stavHum.color, stavHum.bg);
+  document.getElementById('stavVlhkostText').textContent = stavHum.label;
+  
+  document.getElementById('hodnotaCasVetrania').childNodes[0].textContent = casVetr;
+  
+  historiaData = historia;
+  kresliGraf(historia);
+  
+  document.getElementById('casAktualizacie').textContent = new Date().toLocaleTimeString('sk-SK');
+}
+
+let jeNacitavanie = true;
+let intervalObnovy = null;
+
+function zobrazNacitavanie() {
+  document.getElementById('overlayNacitavanie').classList.remove('skryte');
+  document.getElementById('overlayChyba').classList.add('skryte');
+}
+function skryNacitavanie() {
+  document.getElementById('overlayNacitavanie').classList.add('skryte');
+}
+function zobrazChybu() {
+  document.getElementById('overlayNacitavanie').classList.add('skryte');
+  document.getElementById('overlayChyba').classList.remove('skryte');
+}
+
+async function obnov() {
+  try {
+    const data = await nacitajData();
+        aktualizujUI(data);
+    if (jeNacitavanie) {
+      skryNacitavanie();
+      jeNacitavanie = false;
+    }
+  } catch (chyba) {
+    console.error('Chyba:', chyba);
+    zobrazChybu();
+  }
+}
+
+function spustiObnovu() {
+  clearInterval(intervalObnovy);
+  zobrazNacitavanie();
+  jeNacitavanie = true;
+  obnov();
+  intervalObnovy = setInterval(obnov, KONFIG.intervalObnovy);
+}
+
+spustiObnovu();
+window.addEventListener('resize', () => {
+  if (historiaData.length) kresliGraf(historiaData);
+});
+</script>
+</body>
+</html>
+  )rawliteral";
+  
+  server.send(200, "text/html", html);
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  
+  // Displej
+  tft.begin();
+  tft.setRotation(0);
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("STARTUJEM...");
+  
+  // BME280 senzor
+  if (!bme.begin(0x76)) {
+    if (!bme.begin(0x77)) {
+      tft.println("BME ERROR");
+      Serial.println("BME280 not found!");
+      while (1);
+    }
+  }
+  tft.println("BME280 OK");
+  
+  // Inicializácia histórie CO2
+  for (int i = 0; i < 20; i++) {
+    historiaCO2[i] = 450 + random(0, 100);
+  }
+  
+  // Vytvorenie vlastnej WiFi siete
+  tft.println("Vytvaram WiFi...");
+  WiFi.softAP(ssid_AP, password_AP);
+  IPAddress myIP = WiFi.softAPIP();
+  
+  tft.setTextColor(ILI9341_GREEN);
+  tft.println("WiFi AP OK");
+  tft.print("SSID: ");
+  tft.println(ssid_AP);
+  tft.print("Heslo: ");
+  tft.println(password_AP);
+  tft.print("IP: ");
+  tft.println(myIP);
+  
+  // Web server
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.begin();
+  
+  tft.println("Server OK");
+  Serial.println("========== EDUAIR SERVER ==========");
+  Serial.print("WiFi: ");
+  Serial.println(ssid_AP);
+  Serial.print("Heslo: ");
+  Serial.println(password_AP);
+  Serial.print("IP adresa: ");
+  Serial.println(myIP);
+  Serial.println("===================================");
+  
+  delay(3000);
+}
+
+// ============================================================
+// LOOP - DISPLEJ (bez CO2)
+// ============================================================
+void loop() {
+  // Čítanie hodnôt zo senzora
+  teplota = bme.readTemperature();
+  vlhkost = bme.readHumidity();
+  tlak = bme.readPressure() / 100.0F;
+  
+  // Kontrola chýb
+  if (isnan(teplota)) teplota = 0;
+  if (isnan(vlhkost)) vlhkost = 0;
+  if (isnan(tlak)) tlak = 0;
+  
+  // Aktualizácia CO2 pre web
+  aktualizujCO2();
+  
+  // ========== DISPLEJ ==========
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // NADPIS EDUAIR (uprostred)
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setTextSize(3);
+  tft.setCursor(110, 10);
+  tft.print("EDUAIR");
+  
+  // Čiara pod nadpisom
+  tft.drawLine(20, 45, 300, 45, ILI9341_WHITE);
+  
+  // TEPLOTA (vľavo)
+  tft.setTextColor(ILI9341_RED);
+  tft.setTextSize(2);
+  tft.setCursor(20, 65);
+  tft.print("Teplota: ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(teplota, 1);
+  tft.print(" ");
+  tft.print((char)247);
+  tft.print("C ");
+  
+  // VLHKOSŤ (vľavo)
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setCursor(20, 105);
+  tft.print("Vlhkost: ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(vlhkost, 0);
+  tft.print(" % ");
+  
+  // TLAK (vľavo)
+  tft.setTextColor(ILI9341_GREEN);
+  tft.setCursor(20, 145);
+  tft.print("Tlak: ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(tlak, 0);
+  tft.print(" hPa ");
+  
+  // WiFi info (dole vľavo)
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setTextSize(1);
+  tft.setCursor(20, 210);
+  tft.print("WiFi: ");
+  tft.print(ssid_AP);
+  tft.setCursor(20, 225);
+  tft.print("IP: ");
+  tft.print(WiFi.softAPIP());
+  
+  // Obsluha web servera
+  server.handleClient();
+  
+  delay(2000);
+  }
