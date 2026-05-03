@@ -85,7 +85,7 @@ void handleData() {
 }
 
 // ============================================================
-// DIZAJNOVÁ HTML STRÁNKA (tvoja predloha)
+// DIZAJNOVÁ HTML STRÁNKA 
 // ============================================================
 void handleRoot() {
   String html = R"rawliteral(
