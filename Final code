@@ -43,7 +43,7 @@ float korigujTeplotu(float nameranaTeplota) {
   return korigovana;
 }
 // ============================================================
-// Odhad CO2 (len pre web)
+// CO2
 // ============================================================
 void aktualizujCO2() {
   // Pre správnu funkciu ENS160 potrebuje teplotu a vlhkosť
