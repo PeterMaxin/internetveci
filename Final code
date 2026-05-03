@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <Adafruit_BME280.h>
+#include <DFRobot_ENS160.h> 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
@@ -20,37 +21,46 @@ WebServer server(80);
 #define TFT_RST  4
 
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+DFRobot_ENS160_I2C ENS160(&Wire, 0x53); 
 Adafruit_BME280 bme;
 
 // Premenné pre hodnoty
 float teplota = 0;
 float vlhkost = 0;
 float tlak = 0;
-int co2 = 0;  // Len pre web stránku
+int co2 = 0; 
 
 // História pre graf CO2
 int historiaCO2[20] = {450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640};
-
+// ============================================================
+// KOREKCIA TEPLOTY 
+// ============================================================
+float korigujTeplotu(float nameranaTeplota) {
+  float korekcia = -1.5;  
+  float korigovana = nameranaTeplota + korekcia;
+  if (korigovana < 15) korigovana = 15;
+  if (korigovana > 35) korigovana = 35;
+  return korigovana;
+}
 // ============================================================
 // Odhad CO2 (len pre web)
 // ============================================================
 void aktualizujCO2() {
-  static unsigned long lastTime = 0;
-  static int lastCO2 = 450;
+  // Pre správnu funkciu ENS160 potrebuje teplotu a vlhkosť
+  ENS160.setTempAndHum(teplota, vlhkost);
   
-  if (millis() - lastTime > 5000) {
-    lastTime = millis();
-    float zmena = (teplota - 22.0) * 15 + (vlhkost - 50.0) * 2;
-    lastCO2 += (int)zmena + random(-20, 20);
-    lastCO2 = constrain(lastCO2, 400, 1800);
-    co2 = lastCO2;
-    
-    // Posun histórie
-    for (int i = 0; i < 19; i++) {
-      historiaCO2[i] = historiaCO2[i+1];
-    }
-    historiaCO2[19] = co2;
+  // Čítanie reálneho CO₂ z ENS160
+  co2 = ENS160.getECO2();
+  
+  // Obmedzenie hodnôt
+  if (co2 < 400) co2 = 400;
+  if (co2 > 5000) co2 = 5000;
+  
+  // Posun histórie pre graf
+  for (int i = 0; i < 19; i++) {
+    historiaCO2[i] = historiaCO2[i+1];
   }
+  historiaCO2[19] = co2;
 }
 
 // ============================================================
@@ -817,7 +827,13 @@ void setup() {
     }
   }
   tft.println("BME280 OK");
-  
+    tft.println("Hladam ENS160...");
+  while (NO_ERR != ENS160.begin()) {
+    tft.println("ENS160 ERROR!");
+    delay(3000);
+  }
+  tft.println("ENS160 OK");
+  ENS160.setPWRMode(ENS160_STANDARD_MODE);
   // Inicializácia histórie CO2
   for (int i = 0; i < 20; i++) {
     historiaCO2[i] = 450 + random(0, 100);
@@ -855,12 +871,10 @@ void setup() {
   delay(3000);
 }
 
-// ============================================================
-// LOOP - DISPLEJ (bez CO2)
-// ============================================================
 void loop() {
   // Čítanie hodnôt zo senzora
-  teplota = bme.readTemperature();
+  float rawTeplota = bme.readTemperature();
+  teplota = korigujTeplotu(rawTeplota);  
   vlhkost = bme.readHumidity();
   tlak = bme.readPressure() / 100.0F;
   
@@ -875,7 +889,7 @@ void loop() {
   // ========== DISPLEJ ==========
   tft.fillScreen(ILI9341_BLACK);
   
-  // NADPIS EDUAIR (uprostred)
+  // NADPIS EDUAIR 
   tft.setTextColor(ILI9341_YELLOW);
   tft.setTextSize(3);
   tft.setCursor(110, 10);
@@ -884,7 +898,7 @@ void loop() {
   // Čiara pod nadpisom
   tft.drawLine(20, 45, 300, 45, ILI9341_WHITE);
   
-  // TEPLOTA (vľavo)
+  // TEPLOTA 
   tft.setTextColor(ILI9341_RED);
   tft.setTextSize(2);
   tft.setCursor(20, 65);
@@ -895,7 +909,7 @@ void loop() {
   tft.print((char)247);
   tft.print("C ");
   
-  // VLHKOSŤ (vľavo)
+  // VLHKOSŤ 
   tft.setTextColor(ILI9341_CYAN);
   tft.setCursor(20, 105);
   tft.print("Vlhkost: ");
@@ -903,7 +917,7 @@ void loop() {
   tft.print(vlhkost, 0);
   tft.print(" % ");
   
-  // TLAK (vľavo)
+  // TLAK 
   tft.setTextColor(ILI9341_GREEN);
   tft.setCursor(20, 145);
   tft.print("Tlak: ");
@@ -911,7 +925,7 @@ void loop() {
   tft.print(tlak, 0);
   tft.print(" hPa ");
   
-  // WiFi info (dole vľavo)
+  // WiFi info 
   tft.setTextColor(ILI9341_YELLOW);
   tft.setTextSize(1);
   tft.setCursor(20, 210);
